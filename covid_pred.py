@@ -27,3 +27,5 @@ def aggregate_pca_by_individual(adata, pca_key="X_pca", agg="mean"):
         labels.append(person)
 
     return np.array(aggregated), np.array(labels)
+
+
