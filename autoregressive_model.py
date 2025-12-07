@@ -25,7 +25,7 @@ class AutoregressiveCellModel(nn.Module):
         self.input_proj = nn.Linear(pca_dim, d_model)
 
         # 2) Learned positional embeddings 
-        self.pos_emb = nn.Embedding(max_seq_len, d_model)
+        #self.pos_emb = nn.Embedding(max_seq_len, d_model)
 
         # 3) Transformer stack (decoder-style with causal mask)
         encoder_layer = nn.TransformerEncoderLayer(
@@ -68,8 +68,8 @@ class AutoregressiveCellModel(nn.Module):
         h = self.input_proj(x)  # (B, T, d_model)
 
         # 2) Add positional embeddings
-        positions = torch.arange(T, device=x.device).unsqueeze(0)  # (1, T)
-        h = h + self.pos_emb(positions)  # (B, T, d_model)
+        #positions = torch.arange(T, device=x.device).unsqueeze(0)  # (1, T)
+        #h = h + self.pos_emb(positions)  # (B, T, d_model)
 
         # 3) Causal mask for autoregressive attention
         causal_mask = self._causal_mask(T, device=x.device)  # (T, T)
