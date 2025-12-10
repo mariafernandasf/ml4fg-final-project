@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+from torch.utils.data import DataLoader
 
 def get_unique_label(series):
     s = series.dropna()
@@ -89,3 +90,61 @@ class CellSequenceDataset(Dataset):
             "x_target": x_target,
             "sample_id": sid,
         }
+    
+def get_dataloaders(adata_train, 
+                 adata_val, 
+                 adata_test, 
+                 seq_len,
+                 samples_per_epoch=10_000,
+                pca_key = "X_pca",
+                sample_key = "sampleID",
+                ):
+    train_dataset = CellSequenceDataset(
+        adata_train,
+        pca_key=pca_key,
+        sample_key=sample_key,
+        seq_len=seq_len,
+        samples_per_epoch=100_000,  
+    )
+
+    val_dataset = CellSequenceDataset(
+        adata_val,
+        pca_key=pca_key,
+        sample_key=sample_key,
+        seq_len=seq_len,
+        samples_per_epoch=10_000,
+    )
+
+    test_dataset = CellSequenceDataset(
+        adata_test,
+        pca_key=pca_key,
+        sample_key=sample_key,
+        seq_len=seq_len,
+        samples_per_epoch=10_000,
+    )
+
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=32,
+        shuffle=False,    # randomness is inside CellSequenceDataset
+        num_workers=4,
+        drop_last=True,
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=32,
+        shuffle=False,
+        num_workers=4,
+        drop_last=False,
+    )
+
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=32,
+        shuffle=False,
+        num_workers=4,
+        drop_last=False,
+    )
+    return train_loader, val_loader, test_loader

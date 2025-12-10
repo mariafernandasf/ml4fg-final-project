@@ -1,6 +1,10 @@
 import torch
 import wandb 
-import numpy as np 
+from models import AutoregressiveCellModel
+import data_sampler
+import time
+import copy
+from pathlib import Path
 
 def gmm_nll(x_next, pi, mu, var):
     """
@@ -81,87 +85,119 @@ def evaluate(model, loader, device):
     return total_loss / max(n_batches, 1)
 
 
-def compute_model_embeddings(model, adata, pca_key="X_pca", batch_size=1024):
-    model.eval()
-    device = next(model.parameters()).device
+def train_model(
+    adata_train,
+    adata_val,
+    adata_test,
+    seq_len=64,
+    pca_dim = 50, 
+    d_model = 256,
+    n_layers = 6,
+    n_heads = 4,
+    d_hid = 512,
+    dropout = 0.1,
+    n_components = 8,
+    max_seq_len = 256,
+    batch_size = 32,
+    lr = 1e-4,
+    epochs = 50,
+    OUTPUT_DIR = Path("/home/ubuntu/ml4fg-final-project/output_models"),
+    ):
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Get PCA matrix
-    X_pca = adata.obsm[pca_key]
-    if not isinstance(X_pca, np.ndarray):
-        X_pca = np.asarray(X_pca)
+    # initialize model
+    model = AutoregressiveCellModel(
+        pca_dim = pca_dim,
+        d_model=d_model,
+        n_layers = n_layers,
+        n_heads = n_heads,
+        d_hid = d_hid,
+        dropout = dropout,
+        n_components = n_components,
+        max_seq_len = max_seq_len,
+        )
+    
+    model.to(torch.device)
+    n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print('number of params:', n_parameters)
 
-    n_cells, pca_dim = X_pca.shape
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, eps=1e-8)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
 
-    # infer embedding dim from model
-    with torch.no_grad():
-        dummy = torch.from_numpy(X_pca[:1]).float().unsqueeze(1).to(device)
-        _, _, _, h = model(dummy)
-        d_model = h.shape[-1]
+    # initialize Wandb
+    wandb.init(
+    project="covid-cell-transformer-gmm",
+    config={
+        "pca_dim": pca_dim,
+        "d_model": d_model,
+        "n_layers": n_layers,
+        "n_heads": n_heads,
+        "dim_feedforward": d_hid,
+        "n_components": n_components,
+        "lr": lr,
+        "batch_size": batch_size,
+        "max_seq_len": max_seq_len,
+        "epochs": epochs,
+    }
+)
 
-    embeddings = np.zeros((n_cells, d_model), dtype=np.float32)
+    wandb.define_metric("train/epoch_loss", summary="min", step_metric="epoch")
+    wandb.define_metric("val/epoch_loss", summary="min", step_metric="epoch")
+    wandb.define_metric("test/loss", summary="min")
+    wandb.watch(model, log = "gradients", log_freq=200)
 
-    # batch inference
-    for start in range(0, n_cells, batch_size):
-        end = min(start + batch_size, n_cells)
-        batch = torch.from_numpy(X_pca[start:end]).float().to(device)
-        batch = batch.unsqueeze(1)  # (B, 1, pca_dim)
+    # get data loaders
+    train_loader, val_loader, test_loader = data_sampler.get_dataloaders(adata_train, 
+                 adata_val, 
+                 adata_test, 
+                 seq_len,
+                 samples_per_epoch=10_000,
+                pca_key = "X_pca",
+                sample_key = "sampleID",
+                )
 
-        with torch.no_grad():
-            pi, mu, var, h = model(batch)  # h: (B, 1, d_model)
+    # train model 
+    best_val_loss = float("inf")
+    best_model_state = None
+    best_epoch = -1
 
-        emb = h[:, 0, :].cpu().numpy()
-        embeddings[start:end] = emb
+    for epoch in range(1, epochs + 1):
+        epoch_start_time = time.time()
 
-    # optional: normalize to unit length (common for embeddings)
-    embeddings = embeddings / (np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-8)
+        # 1) Train
+        train_loss = train_one_epoch(model, train_loader, optimizer, device, epoch, scheduler)
 
-    # store in AnnData
-    adata.obsm["X_model"] = embeddings
-    return embeddings
+        # 2) Validate
+        val_loss = evaluate(model, val_loader, device)
 
+        scheduler.step()
 
-def compute_sequence_embeddings(
-    model,
-    adata,
-    seq_len=128,
-    samples_per_individual=5,
-    pca_key="X_pca",
-):
-    model.eval()
-    device = next(model.parameters()).device
+        elapsed = time.time() - epoch_start_time
+        print(
+            f"| end of epoch {epoch:3d} | time: {elapsed:5.2f}s | "
+            f"train loss {train_loss:5.4f} | val loss {val_loss:5.4f}"
+        )
 
-    X_pca = adata.obsm[pca_key]
-    if not isinstance(X_pca, np.ndarray):
-        X_pca = np.asarray(X_pca)
+        # 3) Track best model by val loss
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_model_state = copy.deepcopy(model.state_dict())
+            best_epoch = epoch
+            print(f"New best model at epoch {best_epoch} with val loss={best_val_loss:5.4f}")
 
-    sample_ids = adata.obs["sampleID"].values
-    individuals = np.unique(sample_ids)
+        
+        wandb.log(
+            {
+                "epoch": epoch,
+                "train/epoch_loss": train_loss,
+                "val/epoch_loss": val_loss,
+                "lr": scheduler.get_last_lr()[0],
+            },
+        )
 
-    sequence_embeddings = []
-    seq_labels = []
+    print(f"Training complete. Best val loss {best_val_loss:5.4f} at epoch {best_epoch}")
+    # save the best model
+    torch.save(best_model_state, OUTPUT_DIR / "best_model.pt")
 
-    for person in individuals:
-        cell_idx = np.where(sample_ids == person)[0]
-        person_cells = X_pca[cell_idx]
-
-        for _ in range(samples_per_individual):
-            # sample a sequence of t cells
-            if len(person_cells) >= seq_len:
-                idx = np.random.choice(len(person_cells), size=seq_len, replace=False)
-            else:
-                idx = np.random.choice(len(person_cells), size=seq_len, replace=True)
-
-            seq = person_cells[idx]
-            seq = torch.from_numpy(seq).float().unsqueeze(0).to(device)  # (1, t, d)
-
-            with torch.no_grad():
-                pi, mu, var, h = model(seq)  # h: (1, t, d_model)
-
-            # final token embedding
-            final_emb = h[:, -1, :].squeeze(0).cpu().numpy()
-            sequence_embeddings.append(final_emb)
-            seq_labels.append(person)
-
-    sequence_embeddings = np.array(sequence_embeddings)
-    seq_labels = np.array(seq_labels)
-    return sequence_embeddings, seq_labels
+    return test_loader, best_model_state
