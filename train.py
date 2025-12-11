@@ -84,11 +84,11 @@ def evaluate(model, loader, device):
 
     return total_loss / max(n_batches, 1)
 
-
 def train_model(
     adata_train,
     adata_val,
     adata_test,
+    device="cuda",
     seq_len=64,
     pca_dim = 50, 
     d_model = 256,
@@ -103,9 +103,7 @@ def train_model(
     epochs = 50,
     OUTPUT_DIR = Path("/home/ubuntu/ml4fg-final-project/output_models"),
     ):
-    
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
+       
     # initialize model
     model = AutoregressiveCellModel(
         pca_dim = pca_dim,
@@ -118,7 +116,7 @@ def train_model(
         max_seq_len = max_seq_len,
         )
     
-    model.to(torch.device)
+    model.to(device)
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
 
@@ -139,7 +137,8 @@ def train_model(
         "batch_size": batch_size,
         "max_seq_len": max_seq_len,
         "epochs": epochs,
-    }
+    },
+    entity="ms7073-columbia-university"
 )
 
     wandb.define_metric("train/epoch_loss", summary="min", step_metric="epoch")
@@ -198,6 +197,6 @@ def train_model(
 
     print(f"Training complete. Best val loss {best_val_loss:5.4f} at epoch {best_epoch}")
     # save the best model
-    torch.save(best_model_state, OUTPUT_DIR / "best_model.pt")
+    torch.save(best_model_state, OUTPUT_DIR / f"best_model_{epochs}epochs_{seq_len}seqlen.pt")
 
     return test_loader, best_model_state
