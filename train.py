@@ -198,5 +198,5 @@ def train_model(
     print(f"Training complete. Best val loss {best_val_loss:5.4f} at epoch {best_epoch}")
     # save the best model
     torch.save(best_model_state, OUTPUT_DIR / f"best_model_{epochs}epochs_{seq_len}seqlen.pt")
-
+    wandb.finish()
     return test_loader, best_model_state
